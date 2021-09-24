@@ -20,19 +20,27 @@ import datetime
 import json
 import math
 import os
+import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
+from logging import StreamHandler
 from typing import Dict, Iterator, List, Optional, Union
 
 import numpy as np
 import torch
 from packaging import version
-from torch.utils.data.dataset import Dataset, IterableDataset
+from torch import nn
+from torch.utils.data import Dataset, IterableDataset, RandomSampler, Sampler
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data.sampler import RandomSampler, Sampler
 
-from .file_utils import is_sagemaker_dp_enabled, is_sagemaker_mp_enabled, is_torch_tpu_available
+from .file_utils import (
+    is_sagemaker_dp_enabled,
+    is_sagemaker_mp_enabled,
+    is_torch_tpu_available,
+    is_training_run_on_sagemaker,
+)
+from .tokenization_utils_base import BatchEncoding
 from .utils import logging
 
 
@@ -41,6 +49,8 @@ if is_sagemaker_dp_enabled():
 else:
     import torch.distributed as dist
 
+if is_training_run_on_sagemaker():
+    logging.add_handler(StreamHandler(sys.stdout))
 
 if is_torch_tpu_available():
     import torch_xla.core.xla_model as xm
@@ -111,7 +121,7 @@ def find_batch_size(tensors):
             result = find_batch_size(t)
             if result is not None:
                 return result
-    elif isinstance(tensors, dict):
+    elif isinstance(tensors, (dict, BatchEncoding)):
         for key, value in tensors.items():
             result = find_batch_size(value)
             if result is not None:
@@ -153,6 +163,7 @@ def distributed_concat(tensor: "torch.Tensor", num_total_examples: Optional[int]
             return type(tensor)(distributed_concat(t, num_total_examples) for t in tensor)
         output_tensors = [tensor.clone() for _ in range(dist.get_world_size())]
         dist.all_gather(output_tensors, tensor)
+        output_tensors = [t if len(t.shape) > 0 else t[None] for t in output_tensors]
         concat = torch.cat(output_tensors, dim=0)
 
         # truncate the dummy elements added by SequentialDistributedSampler
@@ -164,10 +175,12 @@ def distributed_concat(tensor: "torch.Tensor", num_total_examples: Optional[int]
 
 
 def distributed_broadcast_scalars(
-    scalars: List[Union[int, float]], num_total_examples: Optional[int] = None
+    scalars: List[Union[int, float]],
+    num_total_examples: Optional[int] = None,
+    device: Optional[torch.device] = torch.device("cuda"),
 ) -> torch.Tensor:
     try:
-        tensorized_scalar = torch.tensor(scalars).cuda()
+        tensorized_scalar = torch.tensor(scalars).to(device)
         output_tensors = [tensorized_scalar.clone() for _ in range(dist.get_world_size())]
         dist.all_gather(output_tensors, tensorized_scalar)
         concat = torch.cat(output_tensors, dim=0)
@@ -243,7 +256,7 @@ class SequentialDistributedSampler(Sampler):
 
     def __init__(self, dataset, num_replicas=None, rank=None, batch_size=None):
         warnings.warn(
-            "SequentialDistributedSampler is deprecated and will be removed in v5 of Tranformers.",
+            "SequentialDistributedSampler is deprecated and will be removed in v5 of Transformers.",
             FutureWarning,
         )
         if num_replicas is None:
@@ -287,21 +300,21 @@ class SequentialDistributedSampler(Sampler):
         return self.num_samples
 
 
-def get_tpu_sampler(dataset: torch.utils.data.dataset.Dataset, bach_size: int):
+def get_tpu_sampler(dataset: torch.utils.data.Dataset, batch_size: int):
     if xm.xrt_world_size() <= 1:
         return RandomSampler(dataset)
     return DistributedSampler(dataset, num_replicas=xm.xrt_world_size(), rank=xm.get_ordinal())
 
 
 def nested_new_like(arrays, num_samples, padding_index=-100):
-    """ Create the same nested structure as `arrays` with a first dimension always at `num_samples`."""
+    """Create the same nested structure as `arrays` with a first dimension always at `num_samples`."""
     if isinstance(arrays, (list, tuple)):
         return type(arrays)(nested_new_like(x, num_samples) for x in arrays)
     return np.full_like(arrays, padding_index, shape=(num_samples, *arrays.shape[1:]))
 
 
 def expand_like(arrays, new_seq_length, padding_index=-100):
-    """ Expand the `arrays` so that the second dimension grows to `new_seq_length`. Uses `padding_index` for padding."""
+    """Expand the `arrays` so that the second dimension grows to `new_seq_length`. Uses `padding_index` for padding."""
     result = np.full_like(arrays, padding_index, shape=(arrays.shape[0], new_seq_length) + arrays.shape[2:])
     result[:, : arrays.shape[1]] = arrays
     return result
@@ -363,7 +376,7 @@ class DistributedTensorGatherer:
 
     def __init__(self, world_size, num_samples, make_multiple_of=None, padding_index=-100):
         warnings.warn(
-            "DistributedTensorGatherer is deprecated and will be removed in v5 of Tranformers.",
+            "DistributedTensorGatherer is deprecated and will be removed in v5 of Transformers.",
             FutureWarning,
         )
         self.world_size = world_size
@@ -440,14 +453,14 @@ class LabelSmoother:
 
     def __call__(self, model_output, labels):
         logits = model_output["logits"] if isinstance(model_output, dict) else model_output[0]
-        log_probs = -torch.nn.functional.log_softmax(logits, dim=-1)
+        log_probs = -nn.functional.log_softmax(logits, dim=-1)
         if labels.dim() == log_probs.dim() - 1:
             labels = labels.unsqueeze(-1)
 
         padding_mask = labels.eq(self.ignore_index)
         # In case the ignore_index is -100, the gather will fail, so we replace labels by 0. The padding_mask
         # will ignore them in any case.
-        labels.clamp_min_(0)
+        labels = torch.clamp(labels, min=0)
         nll_loss = log_probs.gather(dim=-1, index=labels)
         # works for fp16 input tensor too, by internally upcasting it to fp32
         smoothed_loss = log_probs.sum(dim=-1, keepdim=True, dtype=torch.float32)
@@ -494,7 +507,7 @@ def get_length_grouped_indices(lengths, batch_size, mega_batch_mult=None, genera
     # Switch to put the longest element in first position
     megabatches[0][0], megabatches[max_idx][0] = megabatches[max_idx][0], megabatches[0][0]
 
-    return sum(megabatches, [])
+    return [i for megabatch in megabatches for i in megabatch]
 
 
 class LengthGroupedSampler(Sampler):
@@ -509,24 +522,29 @@ class LengthGroupedSampler(Sampler):
         batch_size: int,
         lengths: Optional[List[int]] = None,
         model_input_name: Optional[str] = None,
+        generator=None,
     ):
         self.dataset = dataset
         self.batch_size = batch_size
         self.model_input_name = model_input_name if model_input_name is not None else "input_ids"
         if lengths is None:
-            if not isinstance(dataset[0], dict) or self.model_input_name not in dataset[0]:
+            if (
+                not (isinstance(dataset[0], dict) or isinstance(dataset[0], BatchEncoding))
+                or self.model_input_name not in dataset[0]
+            ):
                 raise ValueError(
                     "Can only automatically infer lengths for datasets whose items are dictionaries with an "
                     f"'{self.model_input_name}' key."
                 )
             lengths = [len(feature[self.model_input_name]) for feature in dataset]
         self.lengths = lengths
+        self.generator = generator
 
     def __len__(self):
         return len(self.lengths)
 
     def __iter__(self):
-        indices = get_length_grouped_indices(self.lengths, self.batch_size)
+        indices = get_length_grouped_indices(self.lengths, self.batch_size, generator=self.generator)
         return iter(indices)
 
 
@@ -575,7 +593,10 @@ class DistributedLengthGroupedSampler(DistributedSampler):
         self.model_input_name = model_input_name if model_input_name is not None else "input_ids"
 
         if lengths is None:
-            if not isinstance(dataset[0], dict) or self.model_input_name not in dataset[0]:
+            if (
+                not (isinstance(dataset[0], dict) or isinstance(dataset[0], BatchEncoding))
+                or self.model_input_name not in dataset[0]
+            ):
                 raise ValueError(
                     "Can only automatically infer lengths for datasets whose items are dictionaries with an "
                     f"'{self.model_input_name}' key."
@@ -679,7 +700,7 @@ class IterableDatasetShard(IterableDataset):
 
 
     Args:
-        dataset (:obj:`torch.utils.data.dataset.IterableDataset`):
+        dataset (:obj:`torch.utils.data.IterableDataset`):
             The batch sampler to split in several shards.
         batch_size (:obj:`int`, `optional`, defaults to 1):
             The size of the batches per shard.
@@ -895,12 +916,12 @@ def log_metrics(self, split, metrics):
     if not self.is_world_process_zero():
         return
 
-    logger.info(f"***** {split} metrics *****")
+    print(f"***** {split} metrics *****")
     metrics_formatted = self.metrics_format(metrics)
     k_width = max(len(str(x)) for x in metrics_formatted.keys())
     v_width = max(len(str(x)) for x in metrics_formatted.values())
     for key in sorted(metrics_formatted.keys()):
-        logger.info(f"  {key: <{k_width}} = {metrics_formatted[key]:>{v_width}}")
+        print(f"  {key: <{k_width}} = {metrics_formatted[key]:>{v_width}}")
 
 
 def save_metrics(self, split, metrics, combined=True):
@@ -974,10 +995,15 @@ if is_sagemaker_mp_enabled():
     import smdistributed.modelparallel.torch as smp
 
     @smp.step()
-    def smp_forward_backward(model, inputs, gradient_accumulation_steps=1):
-        outputs = model(**inputs)
+    def smp_forward_backward(model, inputs, gradient_accumulation_steps=1, scaler=None):
+        with torch.cuda.amp.autocast(enabled=(scaler is not None)):
+            outputs = model(**inputs)
+
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
         loss /= gradient_accumulation_steps
+        if scaler is not None:
+            loss = scaler.scale(loss).squeeze()
+
         model.backward(loss)
         return loss
 

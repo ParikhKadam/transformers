@@ -19,7 +19,7 @@ import copy
 import tempfile
 import unittest
 
-from transformers import is_torch_available
+from transformers import LEDConfig, is_torch_available
 from transformers.file_utils import cached_property
 from transformers.models.auto import get_values
 from transformers.testing_utils import require_sentencepiece, require_tokenizers, require_torch, slow, torch_device
@@ -34,7 +34,6 @@ if is_torch_available():
 
     from transformers import (
         MODEL_FOR_QUESTION_ANSWERING_MAPPING,
-        LEDConfig,
         LEDForConditionalGeneration,
         LEDForQuestionAnswering,
         LEDForSequenceClassification,
@@ -52,6 +51,7 @@ def prepare_led_inputs_dict(
     decoder_attention_mask=None,
     head_mask=None,
     decoder_head_mask=None,
+    cross_attn_head_mask=None,
 ):
     if attention_mask is None:
         attention_mask = input_ids.ne(config.pad_token_id)
@@ -61,6 +61,8 @@ def prepare_led_inputs_dict(
         head_mask = torch.ones(config.encoder_layers, config.encoder_attention_heads, device=torch_device)
     if decoder_head_mask is None:
         decoder_head_mask = torch.ones(config.decoder_layers, config.decoder_attention_heads, device=torch_device)
+    if cross_attn_head_mask is None:
+        cross_attn_head_mask = torch.ones(config.decoder_layers, config.decoder_attention_heads, device=torch_device)
     return {
         "input_ids": input_ids,
         "decoder_input_ids": decoder_input_ids,
@@ -68,10 +70,10 @@ def prepare_led_inputs_dict(
         "decoder_attention_mask": decoder_attention_mask,
         "head_mask": head_mask,
         "decoder_head_mask": decoder_head_mask,
+        "cross_attn_head_mask": cross_attn_head_mask,
     }
 
 
-@require_torch
 class LEDModelTester:
     def __init__(
         self,
@@ -137,7 +139,12 @@ class LEDModelTester:
 
         decoder_input_ids = ids_tensor([self.batch_size, self.seq_length], self.vocab_size)
 
-        config = LEDConfig(
+        config = self.get_config()
+        inputs_dict = prepare_led_inputs_dict(config, input_ids, decoder_input_ids)
+        return config, inputs_dict
+
+    def get_config(self):
+        return LEDConfig(
             vocab_size=self.vocab_size,
             d_model=self.hidden_size,
             encoder_layers=self.num_hidden_layers,
@@ -154,8 +161,6 @@ class LEDModelTester:
             pad_token_id=self.pad_token_id,
             attention_window=self.attention_window,
         )
-        inputs_dict = prepare_led_inputs_dict(config, input_ids, decoder_input_ids)
-        return config, inputs_dict
 
     def prepare_config_and_inputs_for_common(self):
         config, inputs_dict = self.prepare_config_and_inputs()
@@ -269,6 +274,7 @@ class LEDModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
     is_encoder_decoder = True
     test_pruning = False
     test_missing_keys = False
+    test_torchscript = False
 
     def setUp(self):
         self.model_tester = LEDModelTester(self)

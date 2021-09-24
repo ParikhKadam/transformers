@@ -18,7 +18,7 @@
 import unittest
 
 from tests.test_modeling_common import floats_tensor
-from transformers import is_torch_available
+from transformers import BigBirdConfig, is_torch_available
 from transformers.models.auto import get_values
 from transformers.models.big_bird.tokenization_big_bird import BigBirdTokenizer
 from transformers.testing_utils import require_torch, slow, torch_device
@@ -32,7 +32,6 @@ if is_torch_available():
 
     from transformers import (
         MODEL_FOR_PRETRAINING_MAPPING,
-        BigBirdConfig,
         BigBirdForCausalLM,
         BigBirdForMaskedLM,
         BigBirdForMultipleChoice,
@@ -126,7 +125,12 @@ class BigBirdModelTester:
             token_labels = ids_tensor([self.batch_size, self.seq_length], self.num_labels)
             choice_labels = ids_tensor([self.batch_size], self.num_choices)
 
-        config = BigBirdConfig(
+        config = self.get_config()
+
+        return config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
+
+    def get_config(self):
+        return BigBirdConfig(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
             num_hidden_layers=self.num_hidden_layers,
@@ -146,8 +150,6 @@ class BigBirdModelTester:
             num_random_blocks=self.num_rand_blocks,
             position_embedding_type=self.position_embedding_type,
         )
-
-        return config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
 
     def prepare_config_and_inputs_for_decoder(self):
         (
@@ -433,6 +435,7 @@ class BigBirdModelTest(ModelTesterMixin, unittest.TestCase):
     # head masking & pruning is currently not supported for big bird
     test_head_masking = False
     test_pruning = False
+    test_sequence_classification_problem_types = True
 
     # torchscript should be possible, but takes prohibitively long to test.
     # Also torchscript is not an important feature to have in the beginning.

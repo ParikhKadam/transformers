@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
-from torch.nn import functional as F
+from torch import nn
 
 from .file_utils import ModelOutput
 from .generation_beam_search import BeamScorer, BeamSearchScorer
@@ -42,6 +42,7 @@ from .generation_logits_process import (
 )
 from .generation_stopping_criteria import (
     MaxLengthCriteria,
+    MaxNewTokensCriteria,
     MaxTimeCriteria,
     StoppingCriteriaList,
     validate_stopping_criteria,
@@ -64,8 +65,8 @@ class GreedySearchDecoderOnlyOutput(ModelOutput):
             shorter if all batches finished early due to the :obj:`eos_token_id`.
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of
-            shape :obj:`(batch_size, config.vocab_size)`).
+            at each generation step. :obj:`(max_length-input_ids.shape[-1],)`-shaped tuple of :obj:`torch.FloatTensor`
+            with each tensor of shape :obj:`(batch_size, config.vocab_size)`).
         attentions (:obj:`tuple(tuple(torch.FloatTensor))`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
             Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
             :obj:`torch.FloatTensor` of shape :obj:`(batch_size, num_heads, generated_length, sequence_length)`.
@@ -94,8 +95,8 @@ class GreedySearchEncoderDecoderOutput(ModelOutput):
             shorter if all batches finished early due to the :obj:`eos_token_id`.
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of
-            shape :obj:`(batch_size, config.vocab_size)`).
+            at each generation step. :obj:`(max_length-1,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor
+            of shape :obj:`(batch_size, config.vocab_size)`).
         encoder_attentions (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
             Tuple of :obj:`torch.FloatTensor` (one for each layer of the decoder) of shape :obj:`(batch_size,
             num_heads, sequence_length, sequence_length)`.
@@ -134,8 +135,8 @@ class SampleDecoderOnlyOutput(ModelOutput):
             shorter if all batches finished early due to the :obj:`eos_token_id`.
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of
-            shape :obj:`(batch_size*num_return_sequences, config.vocab_size)`).
+            at each generation step. :obj:`(max_length-input_ids.shape[-1],)`-shaped tuple of :obj:`torch.FloatTensor`
+            with each tensor of shape :obj:`(batch_size*num_return_sequences, config.vocab_size)`).
         attentions (:obj:`tuple(tuple(torch.FloatTensor))`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
             Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
             :obj:`torch.FloatTensor` of shape :obj:`(num_return_sequences*batch_size, num_heads, generated_length,
@@ -165,8 +166,8 @@ class SampleEncoderDecoderOutput(ModelOutput):
             shorter if all batches finished early due to the :obj:`eos_token_id`.
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of
-            shape :obj:`(batch_size*num_return_sequences, config.vocab_size)`).
+            at each generation step. :obj:`(max_length-1,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor
+            of shape :obj:`(batch_size*num_return_sequences, config.vocab_size)`).
         encoder_attentions (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
             Tuple of :obj:`torch.FloatTensor` (one for each layer of the decoder) of shape
             :obj:`(batch_size*num_return_sequences, num_heads, sequence_length, sequence_length)`.
@@ -208,8 +209,8 @@ class BeamSearchDecoderOnlyOutput(ModelOutput):
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed beam scores for each vocabulary token at each generation step. Beam scores consisting of log
             softmax scores for each vocabulary token and sum of log softmax of previously generated tokens in this beam
-            . :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of shape
-            :obj:`(batch_size*num_beams*num_return_sequences, config.vocab_size)`).
+            . :obj:`(max_length-input_ids.shape[-1],)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of
+            shape :obj:`(batch_size*num_beams*num_return_sequences, config.vocab_size)`).
         attentions (:obj:`tuple(tuple(torch.FloatTensor))`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
             Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
             :obj:`torch.FloatTensor` of shape :obj:`(batch_size*num_beams, num_heads, generated_length,
@@ -243,7 +244,7 @@ class BeamSearchEncoderDecoderOutput(ModelOutput):
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed beam scores for each vocabulary token at each generation step. Beam scores consisting of log
             softmax scores for each vocabulary token and sum of log softmax of previously generated tokens in this beam
-            . :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of shape
+            . :obj:`(max_length-1,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of shape
             :obj:`(batch_size*num_beams, config.vocab_size)`).
         attentions (:obj:`tuple(tuple(torch.FloatTensor))`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
         encoder_attentions (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
@@ -289,8 +290,8 @@ class BeamSampleDecoderOnlyOutput(ModelOutput):
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed beam scores for each vocabulary token at each generation step. Beam scores consisting of log
             softmax scores for each vocabulary token and sum of log softmax of previously generated tokens in this beam
-            . :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of shape
-            :obj:`(batch_size*num_beams*num_return_sequences, config.vocab_size)`).
+            . :obj:`(max_length-input_ids.shape[-1],)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of
+            shape :obj:`(batch_size*num_beams*num_return_sequences, config.vocab_size)`).
         attentions (:obj:`tuple(tuple(torch.FloatTensor))`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
             Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
             :obj:`torch.FloatTensor` of shape :obj:`(batch_size*num_beams, num_heads, generated_length,
@@ -323,7 +324,7 @@ class BeamSampleEncoderDecoderOutput(ModelOutput):
         scores (:obj:`tuple(torch.FloatTensor)` `optional`, returned when ``output_scores=True`` is passed or when ``config.output_scores=True``):
             Processed beam scores for each vocabulary token at each generation step. Beam scores consisting of log
             softmax scores for each vocabulary token and sum of log softmax of previously generated tokens in this beam
-            . :obj:`(max_length,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of shape
+            . :obj:`(max_length-1,)`-shaped tuple of :obj:`torch.FloatTensor` with each tensor of shape
             :obj:`(batch_size*num_beams, config.vocab_size)`).
         encoder_attentions (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_attentions=True`` is passed or ``config.output_attentions=True``):
             Tuple of :obj:`torch.FloatTensor` (one for each layer of the decoder) of shape :obj:`(batch_size,
@@ -409,7 +410,9 @@ class GenerationMixin:
             # retrieve encoder hidden states
             encoder = self.get_encoder()
             encoder_kwargs = {
-                argument: value for argument, value in model_kwargs.items() if not argument.startswith("decoder_")
+                argument: value
+                for argument, value in model_kwargs.items()
+                if not (argument.startswith("decoder_") or argument.startswith("cross_attn"))
             }
             model_kwargs["encoder_outputs"]: ModelOutput = encoder(input_ids, return_dict=True, **encoder_kwargs)
         return model_kwargs
@@ -626,15 +629,15 @@ class GenerationMixin:
         return processors
 
     def _get_stopping_criteria(
-        self,
-        max_length: Optional[int],
-        max_time: Optional[float],
+        self, max_length: Optional[int], max_time: Optional[float], max_new_tokens: Optional[int], start_length: int
     ) -> StoppingCriteriaList:
         stopping_criteria = StoppingCriteriaList()
         if max_length is not None:
             stopping_criteria.append(MaxLengthCriteria(max_length=max_length))
         if max_time is not None:
             stopping_criteria.append(MaxTimeCriteria(max_time=max_time))
+        if max_new_tokens is not None:
+            stopping_criteria.append(MaxNewTokensCriteria(start_length=start_length, max_new_tokens=max_new_tokens))
         return stopping_criteria
 
     @torch.no_grad()
@@ -659,6 +662,7 @@ class GenerationMixin:
         encoder_no_repeat_ngram_size: Optional[int] = None,
         num_return_sequences: Optional[int] = None,
         max_time: Optional[float] = None,
+        max_new_tokens: Optional[int] = None,
         decoder_start_token_id: Optional[int] = None,
         use_cache: Optional[bool] = None,
         num_beam_groups: Optional[int] = None,
@@ -688,10 +692,13 @@ class GenerationMixin:
         Parameters:
 
             input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
-                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
-            max_length (:obj:`int`, `optional`, defaults to 20):
+                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it with
+                :obj:`bos_token_id` and a batch size of 1.
+            max_length (:obj:`int`, `optional`, defaults to :obj:`model.config.max_length`):
                 The maximum length of the sequence to be generated.
+            max_new_tokens (:obj:`int`, `optional`, defaults to None):
+                The maximum numbers of tokens to generate, ignore the current number of tokens. Use either
+                :obj:`max_new_tokens` or :obj:`max_length` but not both, they serve the same purpose.
             min_length (:obj:`int`, `optional`, defaults to 10):
                 The minimum length of the sequence to be generated.
             do_sample (:obj:`bool`, `optional`, defaults to :obj:`False`):
@@ -762,7 +769,7 @@ class GenerationMixin:
                 Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under
                 returned tensors for more details.
             output_hidden_states (:obj:`bool`, `optional`, defaults to `False`):
-                Whether or not to return trhe hidden states of all layers. See ``hidden_states`` under returned tensors
+                Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors
                 for more details.
             output_scores (:obj:`bool`, `optional`, defaults to `False`):
                 Whether or not to return the prediction scores. See ``scores`` under returned tensors for more details.
@@ -821,7 +828,7 @@ class GenerationMixin:
             ... "at least two people were killed in a suspected bomb attack on a passenger bus "
             ... "in the strife-torn southern philippines on monday , the military said."
             ... )
-            >>> # encode input contex
+            >>> # encode input context
             >>> input_ids = tokenizer(document, return_tensors="pt").input_ids
             >>> # generate 3 independent sequences using beam search decoding (5 beams)
             >>> # with T5 encoder-decoder model conditioned on short news article.
@@ -859,6 +866,15 @@ class GenerationMixin:
         """
 
         # set init values
+        if max_length is None and max_new_tokens is None:
+            # Both are None, default
+            max_length = self.config.max_length
+        elif max_length is not None and max_new_tokens is not None:
+            # Both are set, this is odd, raise a warning
+            warnings.warn(
+                "Both `max_length` and `max_new_tokens` have been set but they serve the same purpose.", UserWarning
+            )
+
         max_length = max_length if max_length is not None else self.config.max_length
         num_beams = num_beams if num_beams is not None else self.config.num_beams
         num_beam_groups = num_beam_groups if num_beam_groups is not None else self.config.num_beam_groups
@@ -883,7 +899,7 @@ class GenerationMixin:
         model_kwargs["output_attentions"] = output_attentions
         model_kwargs["output_hidden_states"] = output_hidden_states
 
-        if input_ids is None:
+        if input_ids is None and "inputs_embeds" not in model_kwargs:
             # init `input_ids` with bos_token_id
             input_ids = self._prepare_input_ids_for_generation(bos_token_id, model_kwargs.get("encoder_outputs"))
 
@@ -958,13 +974,10 @@ class GenerationMixin:
             remove_invalid_values=remove_invalid_values,
         )
 
-        stopping_criteria = self._get_stopping_criteria(max_length=max_length, max_time=max_time)
-        if max_length is not None:
-            warnings.warn(
-                "`max_length` is deprecated in this function, use `stopping_criteria=StoppingCriteriaList(MaxLengthCriteria(max_length=max_length))` instead.",
-                UserWarning,
-            )
-            stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
+        cur_len = input_ids.shape[-1]
+        stopping_criteria = self._get_stopping_criteria(
+            max_length=max_length, max_time=max_time, max_new_tokens=max_new_tokens, start_length=cur_len
+        )
 
         if is_greedy_gen_mode:
             if num_return_sequences > 1:
@@ -1027,7 +1040,6 @@ class GenerationMixin:
 
             beam_scorer = BeamSearchScorer(
                 batch_size=batch_size,
-                max_length=stopping_criteria.max_length,
                 num_beams=num_beams,
                 device=self.device,
                 length_penalty=length_penalty,
@@ -1063,7 +1075,6 @@ class GenerationMixin:
                 raise ValueError("`max_length` needs to be a stopping_criteria for now.")
             beam_scorer = BeamSearchScorer(
                 batch_size=batch_size,
-                max_length=stopping_criteria.max_length,
                 num_beams=num_beams,
                 device=self.device,
                 length_penalty=length_penalty,
@@ -1154,9 +1165,8 @@ class GenerationMixin:
 
         Parameters:
 
-            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
-                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
+            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`):
+                The sequence used as a prompt for the generation.
             logits_processor (:obj:`LogitsProcessorList`, `optional`):
                 An instance of :class:`~transformers.LogitsProcessorList`. List of instances of class derived from
                 :class:`~transformers.LogitsProcessor` used to modify the prediction scores of the language modeling
@@ -1176,7 +1186,7 @@ class GenerationMixin:
                 Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under
                 returned tensors for more details.
             output_hidden_states (:obj:`bool`, `optional`, defaults to `False`):
-                Whether or not to return trhe hidden states of all layers. See ``hidden_states`` under returned tensors
+                Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors
                 for more details.
             output_scores (:obj:`bool`, `optional`, defaults to `False`):
                 Whether or not to return the prediction scores. See ``scores`` under returned tensors for more details.
@@ -1380,9 +1390,8 @@ class GenerationMixin:
 
         Parameters:
 
-            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
-                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
+            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`):
+                The sequence used as a prompt for the generation.
             logits_processor (:obj:`LogitsProcessorList`, `optional`):
                 An instance of :class:`~transformers.LogitsProcessorList`. List of instances of class derived from
                 :class:`~transformers.LogitsProcessor` used to modify the prediction scores of the language modeling
@@ -1405,7 +1414,7 @@ class GenerationMixin:
                 Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under
                 returned tensors for more details.
             output_hidden_states (:obj:`bool`, `optional`, defaults to `False`):
-                Whether or not to return trhe hidden states of all layers. See ``hidden_states`` under returned tensors
+                Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors
                 for more details.
             output_scores (:obj:`bool`, `optional`, defaults to `False`):
                 Whether or not to return the prediction scores. See ``scores`` under returned tensors for more details.
@@ -1553,7 +1562,7 @@ class GenerationMixin:
                     )
 
             # sample
-            probs = F.softmax(next_token_scores, dim=-1)
+            probs = nn.functional.softmax(next_token_scores, dim=-1)
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
 
             # finished sentences should have their next token be a padding token
@@ -1621,9 +1630,8 @@ class GenerationMixin:
 
         Parameters:
 
-            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
-                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
+            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`):
+                The sequence used as a prompt for the generation.
             beam_scorer (:obj:`BeamScorer`):
                 An derived instance of :class:`~transformers.BeamScorer` that defines how beam hypotheses are
                 constructed, stored and sorted during generation. For more information, the documentation of
@@ -1646,7 +1654,7 @@ class GenerationMixin:
                 Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under
                 returned tensors for more details.
             output_hidden_states (:obj:`bool`, `optional`, defaults to `False`):
-                Whether or not to return trhe hidden states of all layers. See ``hidden_states`` under returned tensors
+                Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors
                 for more details.
             output_scores (:obj:`bool`, `optional`, defaults to `False`):
                 Whether or not to return the prediction scores. See ``scores`` under returned tensors for more details.
@@ -1700,7 +1708,6 @@ class GenerationMixin:
             >>> # instantiate beam scorer
             >>> beam_scorer = BeamSearchScorer(
             ...     batch_size=1,
-            ...     max_length=model.config.max_length,
             ...     num_beams=num_beams,
             ...     device=model.device,
             ... )
@@ -1756,7 +1763,7 @@ class GenerationMixin:
 
         assert (
             num_beams * batch_size == batch_beam_size
-        ), "Batch dimension of `input_ids` should be {num_beams * batch_size}, but is {batch_beam_size}."
+        ), f"Batch dimension of `input_ids` should be {num_beams * batch_size}, but is {batch_beam_size}."
 
         beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
         beam_scores[:, 1:] = -1e9
@@ -1789,14 +1796,12 @@ class GenerationMixin:
                 continue  # don't waste resources running the code we don't need
 
             next_token_logits = outputs.logits[:, -1, :]
-
             # hack: adjust tokens for Marian. For Marian we have to make sure that the `pad_token_id`
-            # cannot be generated both before and after the `F.log_softmax` operation.
-            next_token_logits = self.adjust_logits_during_generation(
-                next_token_logits, cur_len=cur_len, max_length=None
-            )
-
-            next_token_scores = F.log_softmax(next_token_logits, dim=-1)  # (batch_size * num_beams, vocab_size)
+            # cannot be generated both before and after the `nn.functional.log_softmax` operation.
+            next_token_logits = self.adjust_logits_during_generation(next_token_logits, cur_len=cur_len)
+            next_token_scores = nn.functional.log_softmax(
+                next_token_logits, dim=-1
+            )  # (batch_size * num_beams, vocab_size)
 
             next_token_scores = logits_processor(input_ids, next_token_scores)
             next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -1827,7 +1832,7 @@ class GenerationMixin:
                 next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True
             )
 
-            next_indices = next_tokens // vocab_size
+            next_indices = (next_tokens / vocab_size).long()
             next_tokens = next_tokens % vocab_size
 
             # stateless
@@ -1861,7 +1866,13 @@ class GenerationMixin:
                     this_peer_finished = True
 
         sequence_outputs = beam_scorer.finalize(
-            input_ids, beam_scores, next_tokens, next_indices, pad_token_id=pad_token_id, eos_token_id=eos_token_id
+            input_ids,
+            beam_scores,
+            next_tokens,
+            next_indices,
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
+            max_length=stopping_criteria.max_length,
         )
 
         if return_dict_in_generate:
@@ -1911,9 +1922,8 @@ class GenerationMixin:
 
         Parameters:
 
-            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
-                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
+            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`):
+                The sequence used as a prompt for the generation.
             beam_scorer (:obj:`BeamScorer`):
                 A derived instance of :class:`~transformers.BeamScorer` that defines how beam hypotheses are
                 constructed, stored and sorted during generation. For more information, the documentation of
@@ -1940,7 +1950,7 @@ class GenerationMixin:
                 Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under
                 returned tensors for more details.
             output_hidden_states (:obj:`bool`, `optional`, defaults to `False`):
-                Whether or not to return trhe hidden states of all layers. See ``hidden_states`` under returned tensors
+                Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors
                 for more details.
             output_scores (:obj:`bool`, `optional`, defaults to `False`):
                 Whether or not to return the prediction scores. See ``scores`` under returned tensors for more details.
@@ -2085,12 +2095,11 @@ class GenerationMixin:
             next_token_logits = outputs.logits[:, -1, :]
 
             # hack: adjust tokens for Marian. For Marian we have to make sure that the `pad_token_id`
-            # cannot be generated both before and after the `F.log_softmax` operation.
-            next_token_logits = self.adjust_logits_during_generation(
-                next_token_logits, cur_len=cur_len, max_length=None
-            )
-
-            next_token_scores = F.log_softmax(next_token_logits, dim=-1)  # (batch_size * num_beams, vocab_size)
+            # cannot be generated both before and after the `nn.functional.log_softmax` operation.
+            next_token_logits = self.adjust_logits_during_generation(next_token_logits, cur_len=cur_len)
+            next_token_scores = nn.functional.log_softmax(
+                next_token_logits, dim=-1
+            )  # (batch_size * num_beams, vocab_size)
 
             next_token_scores = logits_processor(input_ids, next_token_scores)
             next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -2118,7 +2127,7 @@ class GenerationMixin:
             vocab_size = next_token_scores.shape[-1]
             next_token_scores = next_token_scores.view(batch_size, num_beams * vocab_size)
 
-            probs = F.softmax(next_token_scores, dim=-1)
+            probs = nn.functional.softmax(next_token_scores, dim=-1)
 
             next_tokens = torch.multinomial(probs, num_samples=2 * num_beams)
             next_token_scores = torch.gather(next_token_scores, -1, next_tokens)
@@ -2160,7 +2169,13 @@ class GenerationMixin:
                     this_peer_finished = True
 
         sequence_outputs = beam_scorer.finalize(
-            input_ids, beam_scores, next_tokens, next_indices, pad_token_id=pad_token_id, eos_token_id=eos_token_id
+            input_ids,
+            beam_scores,
+            next_tokens,
+            next_indices,
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
+            max_length=stopping_criteria.max_length,
         )
 
         if return_dict_in_generate:
@@ -2209,9 +2224,8 @@ class GenerationMixin:
 
         Parameters:
 
-            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
-                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
+            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`):
+                The sequence used as a prompt for the generation.
             beam_scorer (:obj:`BeamScorer`):
                 An derived instance of :class:`~transformers.BeamScorer` that defines how beam hypotheses are
                 constructed, stored and sorted during generation. For more information, the documentation of
@@ -2234,7 +2248,7 @@ class GenerationMixin:
                 Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under
                 returned tensors for more details.
             output_hidden_states (:obj:`bool`, `optional`, defaults to `False`):
-                Whether or not to return trhe hidden states of all layers. See ``hidden_states`` under returned tensors
+                Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors
                 for more details.
             output_scores (:obj:`bool`, `optional`, defaults to `False`):
                 Whether or not to return the prediction scores. See ``scores`` under returned tensors for more details.
@@ -2389,6 +2403,9 @@ class GenerationMixin:
                 cur_len = cur_len + 1
                 continue  # don't waste resources running the code we don't need
 
+            if output_scores:
+                processed_score = torch.zeros_like(outputs.logits[:, -1, :])
+
             for beam_group_idx in range(num_beam_groups):
                 group_start_idx = beam_group_idx * num_sub_beams
                 group_end_idx = min(group_start_idx + num_sub_beams, num_beams)
@@ -2396,9 +2413,6 @@ class GenerationMixin:
 
                 # indices of beams of current group among all sentences in batch
                 batch_group_indices = []
-
-                if output_scores:
-                    processed_score = torch.zeros_like(outputs.logits[:, -1, :])
 
                 for batch_idx in range(batch_size):
                     batch_group_indices.extend(
@@ -2410,12 +2424,11 @@ class GenerationMixin:
                 next_token_logits = outputs.logits[batch_group_indices, -1, :]
 
                 # hack: adjust tokens for Marian. For Marian we have to make sure that the `pad_token_id`
-                # cannot be generated both before and after the `F.log_softmax` operation.
-                next_token_logits = self.adjust_logits_during_generation(
-                    next_token_logits, cur_len=cur_len, max_length=None
-                )
-
-                next_token_scores = F.log_softmax(next_token_logits, dim=-1)  # (batch_size * group_size, vocab_size)
+                # cannot be generated both before and after the `nn.functional.log_softmax` operation.
+                next_token_logits = self.adjust_logits_during_generation(next_token_logits, cur_len=cur_len)
+                next_token_scores = nn.functional.log_softmax(
+                    next_token_logits, dim=-1
+                )  # (batch_size * group_size, vocab_size)
                 vocab_size = next_token_scores.shape[-1]
 
                 next_token_scores = logits_processor(
@@ -2497,7 +2510,13 @@ class GenerationMixin:
                     this_peer_finished = True
 
         sequence_outputs = beam_scorer.finalize(
-            input_ids, beam_scores, next_tokens, next_indices, pad_token_id=pad_token_id, eos_token_id=eos_token_id
+            input_ids,
+            beam_scores,
+            next_tokens,
+            next_indices,
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
+            max_length=stopping_criteria.max_length,
         )
 
         if return_dict_in_generate:
@@ -2538,10 +2557,14 @@ def top_k_top_p_filtering(
 
     Args:
         logits: logits distribution shape (batch size, vocabulary size)
-        if top_k > 0: keep only top k tokens with highest probability (top-k filtering).
-        if top_p < 1.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
-            Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
-        Make sure we keep at least min_tokens_to_keep per batch example in the output
+        top_k (:obj:`int`, `optional`, defaults to 0):
+            If > 0, only keep the top k tokens with highest probability (top-k filtering)
+        top_p (:obj:`float`, `optional`, defaults to 1.0):
+            If < 1.0, only keep the top tokens with cumulative probability >= top_p (nucleus filtering). Nucleus
+            filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+        min_tokens_to_keep (:obj:`int`, `optional`, defaults to 1):
+            Minimumber of tokens we keep per batch example in the output.
+
     From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
     """
     if top_k > 0:

@@ -50,8 +50,8 @@ For example here is how to truncate all three splits to just 50 samples each:
 ```
 examples/pytorch/token-classification/run_ner.py \
 --max_train_samples 50 \
---max_val_samples 50 \
---max_test_samples 50 \
+--max_eval_samples 50 \
+--max_predict_samples 50 \
 [...]
 ```
 
@@ -65,7 +65,7 @@ examples/pytorch/token-classification/run_ner.py -h
 You can resume training from a previous checkpoint like this:
 
 1. Pass `--output_dir previous_output_dir` without `--overwrite_output_dir` to resume training from the latest checkpoint in `output_dir` (what you would use if the training was interrupted, for instance).
-2. Pass `--model_name_or_path path_to_a_specific_checkpoint` to resume training from that checkpoint folder.
+2. Pass `--resume_from_checkpoint path_to_a_specific_checkpoint` to resume training from that checkpoint folder.
 
 Should you want to turn an example into a notebook where you'd no longer have access to the command
 line, 🤗 Trainer supports resuming from a checkpoint via `trainer.train(resume_from_checkpoint)`.
@@ -73,6 +73,17 @@ line, 🤗 Trainer supports resuming from a checkpoint via `trainer.train(resume
 1. If `resume_from_checkpoint` is `True` it will look for the last checkpoint in the value of `output_dir` passed via `TrainingArguments`.
 2. If `resume_from_checkpoint` is a path to a specific checkpoint it will use that saved checkpoint folder to resume the training from.
 
+
+### Upload the trained/fine-tuned model to the Hub
+
+All the example scripts support automatic upload of your final model to the [Model Hub](https://huggingface.co/models) by adding a `--push_to_hub` argument. It will then create a repository with your username slash the name of the folder you are using as `output_dir`. For instance, `"sgugger/test-mrpc"` if your username is `sgugger` and you are working in the folder `~/tmp/test-mrpc`.
+
+To specify a given repository name, use the `--hub_model_id` argument. You will need to specify the whole repository name (including your username), for instance `--hub_model_id sgugger/finetuned-bert-mrpc`. To upload to an organization you are a member of, just use the name of that organization instead of your username: `--hub_model_id huggingface/finetuned-bert-mrpc`.
+
+A few notes on this integration:
+
+- you will need to be logged in to the Hugging Face website locally for it to work, the easiest way to achieve this is to run `huggingface-cli login` and then type your username and password when prompted. You can also pass along your authentication token with the `--hub_token` argument.
+- the `output_dir` you pick will either need to be a new folder or a local clone of the distant repository you are using.
 
 ## Distributed training and mixed precision
 
@@ -119,7 +130,7 @@ When using PyTorch, we support TPUs thanks to `pytorch/xla`. For more context an
 very detailed [pytorch/xla README](https://github.com/pytorch/xla/blob/master/README.md).
 
 In this repo, we provide a very simple launcher script named
-[xla_spawn.py](https://github.com/huggingface/transformers/tree/master/examples/xla_spawn.py) that lets you run our
+[xla_spawn.py](https://github.com/huggingface/transformers/tree/master/examples/pytorch/xla_spawn.py) that lets you run our
 example scripts on multiple TPU cores without any boilerplate. Just pass a `--num_cores` flag to this script, then your
 regular training script with its arguments (this is similar to the `torch.distributed.launch` helper for
 `torch.distributed`):
